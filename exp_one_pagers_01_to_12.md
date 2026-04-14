@@ -1,14 +1,5 @@
 # Experiment One-Pagers: EXP-01 through EXP-12
 
-**Project:** KG-Augmented Hate Speech Detection
-**Target venue:** ACL / EMNLP 2026 (hard deadline May 1, 2026)
-**Compiled:** 2026-04-14
-**Author:** Ally (UNC)
-
-Retroactive one-pagers for the 12 experiments completed before the April planning cycle. Each follows the fixed template: Research question, Motivation, Setup, Metrics, Results, Interpretation, Paper placement, Risks/caveats. Unfilled data is marked `[TODO]` with a concrete instruction for how to fill it.
-
----
-
 ## Table of contents
 
 1. EXP-01 — Dim1 Stage 1 binary classifier
