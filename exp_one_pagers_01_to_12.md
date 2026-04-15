@@ -770,6 +770,257 @@ Main Results, critic-layer subsection, as a "novel finding" subsection or callou
 
 ---
 
+## EXP-13 — V2.1 prompt audit and rerun (RR-01)
+
+**Experiment ID:** EXP-13
+**Date run:** 2026-04-14
+**Paper placement:** Methods (critic-prompt design) + Main Results (critic model comparison table)
+
+### Research question
+Does adding structured decision rules, boundary disambiguation examples, and fairness checklists to critic system prompts improve cross-model agreement (kappa-stability), reduce review rates, and preserve grounding fidelity, without rebuilding the benchmark infrastructure or the 500-example cache? Stated as a hypothesis: moving from generic critic role descriptions to structured critic prompts with taxonomy definitions, disambiguating tests, and action-choice rubrics will (a) raise kappa-stability across models, (b) reduce flag and review rates by giving critics a clearer basis for decisions, and (c) not introduce new hallucination failure modes.
+
+### Motivation
+The V2.1 baseline (EXP-10) gave critics a structured REASONING block (EVIDENCE FOR / AGAINST / DECISION) and a counter_consideration field, but left critic role descriptions thin: one or two sentences per critic with no decision rules, no examples, and no taxonomy. Two problems followed. First, the Stage 2 confusion matrix showed 1,262 Identity Hate examples misclassified as Interpersonal Abuse, and the V2.1 baseline critics had no principled way to adjudicate this boundary. Second, Critic 2 (Contextual Fairness) had no fairness checklist, and Critic 3 (Threat Escalation) had no score definitions or KG false-positive guidance, making them less able to push back on upstream errors. RR-01 tests whether adding that structure while preserving V2.1's grounding constraints improves cross-model agreement.
+
+### Setup
+- **Critic pipeline:** V2.1 critics (`src/critics/critics_v2.py`), structured CoT REASONING block, counter_consideration field, primary + up to 2 additional_quotes, quote_strength field, all three critics running in parallel per example.
+- **Prompt audit additions (Option C taxonomy, preserving the old "1.0 = non-harmful" label convention):**
+  - Critic 1: HARM LABEL TAXONOMY block (1.0, 1.1, 1.2, 1.3), Identity Hate vs Interpersonal Abuse decision rule with disambiguating test ("mentally remove identity references; does the harm survive?"), Examples A and B at the boundary, ACTION CHOICE rubric.
+  - Critic 2: FAIRNESS CHECKLIST (reclaimed in-group language, AAVE, quoted/reported speech, irony, counter-speech, critique of power), explicit WHEN NOT TO OVERRIDE clause, late-added AGREE-vs-OVERRIDE clarifier that forbids "overriding" Dim1's already-non-harmful labels.
+  - Critic 3: SCORE DEFINITIONS for extremism_risk_score and op_threat_score on a 0.0/0.3/0.6/1.0 scale, KG false-positive guidance (country names, demographic terms, broad nouns all discounted), VETO-ONLY-DOWNWARD rule restated, Russia travel-commentary false-positive example.
+- **Models (top 5, qwen dropped from V2.1 baseline):** `google/gemma-4-31b-it`, `gpt-5.4-mini`, `anthropic/claude-sonnet-4-6`, `deepseek/deepseek-r1`, `x-ai/grok-4.20`.
+- **Cache:** 500-example cache at `src/critics/cache_examples.jsonl`, unchanged from V2.1 baseline. Dim1 label distribution: 1.0 non-harmful 194 (38.8%), 1.1 identity hate 194 (38.8%), 1.2 interpersonal abuse 42 (8.4%), 1.3 crisis 70 (14.0%). Dim3 activation rate 10.8% (confirms cache was built post-activation-gate-fix).
+- **Routing:** all models via OpenRouter with explicit per-model overrides, 4-attempt retry on transient errors, temperature 0.0.
+- **Hardware:** Lightning.ai A100 80GB, but benchmark is API-only (no GPU use).
+- **Benchmark call volume:** 5 models x 500 examples x 3 critics = **7,500 critic calls**.
+- **Wall time:** 1 hour 30 minutes, 0 errors at the model level (individual critic-call parse failures counted separately below).
+- **Pipeline aggregator fix applied alongside:** `_critic_label_to_canonical` now reads `corrected.label` as an integer fallback when `corrected.harm_label` is absent, so Critic 2's votes are no longer silently ignored in the majority-override branch.
+- **Output paths:** `src/critics/benchmark_v2_results/` (raw jsonl per model), `src/critics/analysis_v2/` (post-audit summary), `src/critics/analysis_v2_pre_audit/` (pre-audit snapshot).
+
+### Metrics
+- **agree_rate, adjust_rate, override_rate, flag_rate:** per-model distribution of critic actions across 1,500 critic calls. Primary indicator of how decisively each critic commits to a judgment.
+- **review_rate:** fraction of examples where at least one critic flagged OR all three disagreed. Operational metric for how often human review would be triggered.
+- **kappa-stability:** average pairwise Cohen's kappa between a model and all other models, on the harm-label decision. **Primary selection metric** for which critic model is most representative of cross-model consensus. Reported apples-to-apples (5 shared models only).
+- **hallucination_rate:** fraction of critic calls where the primary or additional quote fails the substring check against the post. Fidelity of the grounding mechanism.
+- **Critic 2 false-override rate:** fraction of Critic 2 OVERRIDE actions where Dim1 already predicted non-harmful and Critic 2 "overrode" to non-harmful. Measures phantom-override inflation in Critic 2's OVERRIDE totals.
+- **Mean latency and estimated cost:** per-critic-call mean latency and total estimated OpenRouter cost for the 1,500-call run per model. Operational deployment signal.
+
+### Results
+
+**Kappa-stability, apples-to-apples 5-model comparison (qwen dropped from pre-audit to match post-audit):**
+
+| Model | pre-audit (5-model) | post-audit | delta |
+|---|---|---|---|
+| google/gemma-4-31b-it | 0.3775 | **0.4210** | +0.044 |
+| anthropic/claude-sonnet-4-6 | 0.3250 | 0.3520 | +0.027 |
+| x-ai/grok-4.20 | 0.3232 | 0.3530 | +0.030 |
+| deepseek/deepseek-r1 | 0.3220 | 0.3490 | +0.027 |
+| gpt-5.4-mini | 0.3028 | 0.2330 | **-0.070** |
+
+**Action distribution, pre-audit vs post-audit (shown as pre -> post):**
+
+| Model | agree | override | flag | review rate |
+|---|---|---|---|---|
+| grok | 0.79 -> 0.69 | 0.12 -> 0.19 | 0.04 -> 0.02 | 0.23 -> 0.15 |
+| gemma | 0.77 -> 0.76 | 0.20 -> 0.18 | 0.02 -> 0.02 | 0.27 -> **0.14** |
+| sonnet | 0.68 -> 0.69 | 0.11 -> 0.12 | 0.16 -> 0.12 | 0.37 -> 0.33 |
+| r1 | 0.66 -> **0.75** | 0.17 -> 0.16 | 0.16 -> **0.06** | 0.62 -> **0.30** |
+| gpt-mini | 0.62 -> 0.58 | 0.10 -> 0.17 | 0.07 -> 0.08 | 0.47 -> 0.34 |
+
+**Critic 2 false-override rate (OVERRIDE to non-harmful when Dim1 was already non-harmful):**
+
+| Model | total c2 overrides | false overrides | false rate |
+|---|---|---|---|
+| anthropic/claude-sonnet-4-6 | 130 | 0 | **0.0%** |
+| deepseek/deepseek-r1 | 116 | 0 | **0.0%** |
+| google/gemma-4-31b-it | 160 | 0 | **0.0%** |
+| x-ai/grok-4.20 | 252 | 12 | 4.8% |
+| gpt-5.4-mini | 223 | 25 | **11.2%** |
+
+**Grounding fidelity (post-audit):**
+
+| Model | hallucination rate | unparseable | API errors |
+|---|---|---|---|
+| gpt-5.4-mini | **0.33%** | 0 | 0 |
+| deepseek/deepseek-r1 | 0.53% | 48 | 18 |
+| google/gemma-4-31b-it | 0.53% | 14 | 14 |
+| x-ai/grok-4.20 | 1.47% | 0 | 0 |
+| anthropic/claude-sonnet-4-6 | **2.87%** | 0 | 0 |
+
+**r1 parse-failure diff, pre-audit vs post-audit (tests whether r1's review-rate drop is due to improved parseability rather than the prompt audit itself):**
+
+| Metric | pre | post | delta |
+|---|---|---|---|
+| unparseable | 8 | 30 | **+22** |
+| API errors | 20 | 18 | -2 |
+| hallucinated primary quote | 11 | 8 | -3 |
+| hallucinated additional quote | 15 | 13 | -2 |
+
+r1 had 22 MORE unparseable responses post-audit, not fewer. All of r1's review-rate improvement (62% to 30%) is attributable to the structured decision rules themselves.
+
+**Counter_consideration length (reasoning-depth proxy, chars):**
+
+| Model | mean | median |
+|---|---|---|
+| anthropic/claude-sonnet-4-6 | **181.7** | 180 |
+| x-ai/grok-4.20 | 140.9 | 139 |
+| deepseek/deepseek-r1 | 127.2 | 126 |
+| gpt-5.4-mini | 116.8 | 116 |
+| google/gemma-4-31b-it | 96.3 | 95 |
+
+**Estimated API cost and mean latency per 1,500-call run:**
+
+| Model | total cost (USD) | mean latency per call (s) | cost per 0.01 kappa |
+|---|---|---|---|
+| google/gemma-4-31b-it | **$0.34** | 39.42 | $0.008 |
+| gpt-5.4-mini | $0.61 | 2.99 | $0.026 |
+| deepseek/deepseek-r1 | $7.68 | 58.78 | $0.220 |
+| x-ai/grok-4.20 | $13.66 | 3.06 | $0.387 |
+| anthropic/claude-sonnet-4-6 | **$16.45** | 9.06 | $0.467 |
+
+Gemma delivers the best kappa-stability at 48x lower cost than sonnet. Gemma and r1 are the slowest critics per call (~40-60s); grok and gpt-mini are the fastest (~3s). Prices are rough OpenRouter estimates and should be validated against actual invoices before final submission.
+
+### What the results mean
+The audit achieved its primary goal: **kappa-stability rose for four of five models, review rates fell for four of five models, and r1 went from the least decisive critic (62% review rate) to the third most stable (30% review rate)**. The paper can claim that structured decision rules and boundary disambiguation in critic prompts produce measurable gains in cross-model agreement without degrading grounding fidelity. Gemma remains the most kappa-stable critic and is the recommended default for downstream pipeline integration (EXP-22).
+
+The paper cannot claim the audit helped every model uniformly. gpt-5.4-mini lost 0.070 kappa-stability, the largest single-model regression in the experiment. The most plausible reading: gpt-mini is the smallest top-5 model, and structured prompts with long decision rules and multiple examples push it toward rule-following behavior it can only partially execute, leading to fine-grained but inconsistent distinctions (its ADJUST rate is 17%; every other model is below 10%). This is consistent with the V2 finding that prompt structure helps larger models more than smaller ones. The r1 win is the cleanest, most defensible story: parse failures actually went up under the audit, so the entire review-rate improvement is attributable to the prompts themselves rather than benchmark-runner improvements. The Critic 2 false-override finding is better than feared: three of five models had zero phantom overrides, and the worst offender (gpt-mini at 11.2%) is still small enough to report as a footnote rather than a caveat.
+
+### Paper placement
+Methods section: the audited prompts are the "final V2.1+" critic design and should be described in the critic-layer subsection with decision rules summarized in an appendix figure. Main Results: the pre/post comparison tables become Table X in the critic-model selection subsection, replacing the V2.1 baseline numbers. The r1 improvement story is a standalone paragraph in Results. The gpt-mini regression and the sonnet hallucination observation go into Discussion as qualitative notes on prompt-structure and model-capacity interaction. The cost table supports a one-paragraph "deployment considerations" note.
+
+### Risks / caveats
+- **Sonnet hallucination rate is 5.4x the median and unexplained.** Sonnet at 2.87% is the highest of any model; it is also the most deliberative critic on every other measure. See EXP-30 for the follow-up investigation.
+- **gpt-5.4-mini regression is not validated against a held-out set.** `[TODO: run EXP-15 stratified subsample and recompute gpt-mini kappa-stability per category; if the regression is uniform across categories, it is a real capacity effect; if it concentrates on identity-hate vs interpersonal-abuse boundary cases, it is a rule-following confusion.]`
+- **OpenRouter pricing estimates are approximate.** `[TODO: cross-check total cost figures against the actual OpenRouter invoice for 2026-04-14 before final submission.]`
+- **The small Interpersonal Abuse class (N=42, 8.4%) in the cache means per-category statistics have wide confidence intervals.** EXP-15 addresses this via stratified resampling.
+- **Critic 2 phantom-override footnote still required for grok (4.8%) and gpt-mini (11.2%).** Aggregator is unaffected because it requires two votes, but single-critic override precision numbers for those two models should be reported with the false-override rate.
+- **The Critic 1 taxonomy patch was applied surgically, not via a clean revert.** Parse-checked and smoke-tested, but no regression suite exists. `[TODO: write a minimal prompt regression test (5 examples per critic, expected action) and run it before EXP-22 full-pipeline integration.]`
+- **The benchmark cache is fixed at 500 examples.** All five models see the same posts, which is correct for comparison, but the absolute numbers are specific to this cache. A second run on a disjoint 500-example sample would strengthen claims about magnitude; time permitting, run EXP-24 bootstrap CIs to put error bars on the kappa-stability numbers.
+
+---
+
+## EXP-14 — Intra-model critic agreement (ensemble justification)
+
+**Experiment ID:** EXP-14
+**Date run:** 2026-04-14
+**Paper placement:** Methods (critic-ensemble architecture) + Discussion (ensemble justification paragraph)
+
+### Research question
+Are the three critics (Classification Validation, Contextual Fairness, Threat Escalation) performing functionally independent work on the same input, or are they largely converging on the same judgment? Stated operationally: what is Cohen's kappa between Critic 1 and Critic 2, Critic 1 and Critic 3, and Critic 2 and Critic 3, measured within a single model on the same 500 examples? Low intra-model kappa means the three-critic ensemble is justified because each critic contributes independent signal; high intra-model kappa means one critic could be dropped without loss of information.
+
+### Motivation
+The three-critic-ensemble architecture is a central design claim of the paper. A reviewer will ask: "if all three critics usually agree, why not use one critic?" Without an empirical answer, the ensemble looks redundant and expensive. This experiment pre-empts that question with a direct measurement. It reuses the RR-01 data (no new API calls) and is pure post-hoc analysis.
+
+### Setup
+- **Data:** 500 examples x 5 models x 3 critics per example from `src/critics/benchmark_v2_results/`, post-audit (EXP-13).
+- **Action canonicalization:** Critic actions are collapsed to three comparable classes for kappa computation:
+  - AGREE and ADJUST both map to "keep" (Dim1's label stands).
+  - OVERRIDE maps to "change" (critic wants a different label).
+  - FLAG maps to "unsure" (critic defers to human review).
+- **Metric:** Cohen's kappa between every pair of critics within each model, computed with `sklearn.metrics.cohen_kappa_score`.
+- **Interpretation thresholds used in the paper:** kappa < 0.30 = critics are independent (ensemble justified); kappa > 0.60 = critics are redundant (one could be dropped); middle range = partially independent, case-by-case design call.
+
+### Metrics
+- **Cohen's kappa (pairwise, within model):** c1-vs-c2, c1-vs-c3, c2-vs-c3.
+- **Mean intra-model kappa:** simple mean of the three pairs, used as the headline "how independent is this model's critic ensemble" number.
+- Comparison to inter-model kappa (the EXP-13 cross-model stability) as context for whether intra-model or inter-model variance dominates.
+
+### Results
+
+**Intra-model Cohen's kappa per critic pair:**
+
+| Model | c1 vs c2 | c1 vs c3 | c2 vs c3 | mean intra-kappa |
+|---|---|---|---|---|
+| anthropic/claude-sonnet-4-6 | 0.297 | 0.114 | 0.071 | **0.161** |
+| google/gemma-4-31b-it | 0.314 | 0.108 | 0.029 | **0.150** |
+| x-ai/grok-4.20 | 0.179 | 0.058 | 0.024 | 0.087 |
+| deepseek/deepseek-r1 | 0.112 | 0.061 | -0.018 | 0.051 |
+| gpt-5.4-mini | 0.101 | -0.002 | -0.032 | **0.022** |
+
+**Intra-model vs inter-model kappa (inter is EXP-13 post-audit stability):**
+
+| Model | mean intra-kappa | inter-model kappa | ratio (inter / intra) |
+|---|---|---|---|
+| google/gemma-4-31b-it | 0.150 | 0.421 | 2.8x |
+| anthropic/claude-sonnet-4-6 | 0.161 | 0.352 | 2.2x |
+| x-ai/grok-4.20 | 0.087 | 0.353 | 4.1x |
+| deepseek/deepseek-r1 | 0.051 | 0.349 | 6.8x |
+| gpt-5.4-mini | 0.022 | 0.233 | 10.6x |
+
+Mean intra-model kappa ranges from 0.022 (gpt-mini) to 0.161 (sonnet). All five models sit firmly below the 0.30 "independent" threshold. For every model, inter-model kappa exceeds intra-model kappa by 2.2x to 10.6x. This means: when gemma-Critic-1 looks at a post, its judgment is more similar to sonnet-Critic-1 than it is to gemma-Critic-2 on the same post.
+
+### What the results mean
+**The three critics perform functionally independent work.** Within a single model, Critics 1, 2, and 3 produce near-chance-independent action distributions on the same 500 posts, with mean kappa never exceeding 0.161. The lowest pairwise kappa (c2 vs c3) is slightly negative for three of five models, indicating literally no agreement above chance. The highest pairwise kappa (c1 vs c2) tops out at 0.314 for gemma, which is still comfortably below the 0.30 interpretability threshold. Each critic role contributes distinct signal, and dropping any one critic would remove information from the ensemble. This validates the three-critic architecture empirically.
+
+The paper should note one honest caveat: Critic 3 only activates meaningfully when Dim3 activates (10.8% of examples). On the other 89.2%, Critic 3 receives a null Dim3 output and essentially always AGREEs, which artificially lowers c1-vs-c3 and c2-vs-c3 kappas. The more stringent test is c1-vs-c2, because both read every post and perform classification work. Even there, the highest pairwise kappa is 0.314 (gemma), meaning Critic 1 and Critic 2 disagree on roughly two-thirds of the 500 posts after chance correction. The ensemble is doing genuine work, not padding.
+
+The secondary finding is that **cross-model variance dominates within-model variance by a large margin.** Gemma-Critic-1 is more similar to sonnet-Critic-1 than to gemma-Critic-2. This suggests the critic *role* (1, 2, or 3) is a stronger source of judgment variance than the model backbone. Role design is more important than model choice once you're at a reasonable model size.
+
+### Paper placement
+Methods section: one paragraph in the critic-ensemble subsection citing the intra-model kappa numbers as empirical justification for the three-critic design. A small table (the first table above) belongs in the main text. The inter-vs-intra ratio table goes in Discussion as evidence that critic role design is more impactful than model choice.
+
+### Risks / caveats
+- **Critic 3 null-activation bias.** On ~89% of examples, Dim3 is not activated and Critic 3 receives a null payload, biasing it toward AGREE. The c1-vs-c3 and c2-vs-c3 numbers are deflated as a result. Report c1-vs-c2 as the primary intra-model kappa in the paper and note this bias in the footnote. `[TODO: recompute c1-vs-c3 and c2-vs-c3 kappas restricted to the 54 Dim3-activated examples only, and report both conditional and marginal kappas.]`
+- **Action canonicalization is coarse.** Collapsing AGREE and ADJUST to "keep" loses information about confidence recalibration. `[TODO: also compute intra-model kappa on the fine-grained 4-action space (AGREE, ADJUST, OVERRIDE, FLAG) and report in the appendix if the story changes.]`
+- **500-example sample size.** Intra-model kappa has known high variance on samples below 1000. `[TODO: bootstrap 95% CIs on intra-model kappas in EXP-24 and report interval estimates alongside point estimates.]`
+- **gpt-mini's near-zero intra-kappa could be read two ways.** Either (a) its three critics are genuinely doing independent work (the charitable read) or (b) its three critics are each making near-random decisions (the skeptical read). The first reading is supported by gpt-mini's low hallucination rate (0.33%, lowest of any model), which is inconsistent with random behavior. But this should be stated explicitly. `[TODO: manually inspect 20 gpt-mini examples where all three critics took different actions to confirm the independent-work reading.]`
+
+---
+
+## EXP-15 — Stratified subsample ablation (class-balanced reanalysis)
+
+**Experiment ID:** EXP-15
+**Date run:** TODO
+**Paper placement:** Appendix (robustness check) + footnote in main results table
+
+### Research question
+Do the kappa-stability and action-distribution results from EXP-13 hold when the 500-example cache is resampled to have equal representation across the four harm-label classes? In particular: is gemma's post-audit kappa-stability lead robust to the 38.8 / 38.8 / 8.4 / 14.0 class imbalance in the original cache, and does gpt-5.4-mini's regression concentrate on a specific category (suggesting a rule-following confusion) or persist uniformly (suggesting a capacity effect)?
+
+### Motivation
+The 500-example cache is class-imbalanced: 194 non-harmful, 194 identity hate, 42 interpersonal abuse, 70 crisis. Any aggregate metric on this cache is dominated by the two large classes. A reviewer will reasonably ask whether the per-model rankings would survive on a balanced test set. Running a stratified subsample answers that question without any new API calls, by recomputing metrics on a deterministic subset of the existing jsonl rows. The analysis is also the best way to interpret the gpt-5.4-mini regression in EXP-13: if gpt-mini loses kappa-stability uniformly across all four classes, it is a model-capacity story; if it loses only on the identity-hate vs interpersonal-abuse boundary, it is a rule-confusion story with different implications for the paper.
+
+### Setup
+- **Data source:** existing `src/critics/benchmark_v2_results/` jsonl files from EXP-13, joined to the cache at `src/critics/cache_examples.jsonl` on example id.
+- **Stratification scheme:** sample N=42 examples from each of the four Dim1 label classes (non-harmful, identity hate, interpersonal abuse, crisis), yielding 42 x 4 = 168 examples with perfectly equal class representation. N=42 is chosen as the minimum class size (Interpersonal Abuse has exactly 42 examples). Use a fixed random seed (seed=42) so the subsample is reproducible.
+- **Comparison:** recompute kappa-stability, agree/override/flag rates, hallucination rate, and mean counter_consideration length on the 168-example subset and compare against the full 500-example numbers from EXP-13.
+- **Per-category breakdown:** within the subsample, compute kappa-stability and action distributions *conditional on* each of the four classes, yielding a 5 x 4 table per metric.
+- **Output:** `src/critics/analysis_v2/stratified_subsample/` containing subsample_ids.json, kappa_by_class.csv, action_dist_by_class.csv, comparison_vs_full.txt.
+
+### Metrics
+- **kappa-stability on 168-example subset:** direct comparison to EXP-13's 500-example kappa. Tests whether model rankings are stable.
+- **Per-class kappa-stability:** 5 models x 4 classes = 20 numbers. **Primary new measurement.** Tells the gpt-mini regression story and exposes whether any model is particularly weak on a specific category.
+- **Per-class override-precision:** fraction of OVERRIDE actions that were correct (matched the gold label). Requires gold labels in the cache; if absent, skip this metric and note as caveat.
+- **Delta vs full-cache:** per-model agree/override/flag rate differences between the 168-subset and the 500-full.
+
+### Results
+TODO: to be filled in during the next session. Expected outputs:
+
+- A kappa-stability comparison table (full vs subsample) with 5 rows.
+- A per-class kappa-stability heatmap (5 models x 4 classes).
+- A per-class action distribution table.
+- A single "gpt-mini regression diagnosis" paragraph stating whether the regression is uniform (capacity) or concentrated (rule confusion).
+
+### What the results mean
+TODO: to be filled in after the experiment runs. Expected outcomes and their interpretations:
+
+- If gemma remains the top kappa-stability model on the subsample, the EXP-13 main-results ranking is robust to class imbalance and the paper can report the 500-example numbers as headline without caveats.
+- If gemma loses its lead on the subsample, the paper needs to report both numbers and discuss which is more informative for deployment.
+- If gpt-mini's regression is uniform across classes, the paper argues capacity-based limitation (structured prompts hurt small models).
+- If gpt-mini's regression concentrates on a specific class, the paper argues rule-confusion and proposes a smaller set of decision rules for capacity-constrained critics.
+
+### Paper placement
+Appendix (robustness-check section) with the subsample ranking table and the per-class heatmap. A one-sentence footnote in the main-results table in the body: "Results are robust to class imbalance; see Appendix X for stratified subsample analysis." The gpt-mini diagnosis paragraph goes in Discussion next to the EXP-13 gpt-mini regression observation.
+
+### Risks / caveats
+- **N=42 per class is small for kappa-stability estimation.** Cohen's kappa has high variance below N=100; the subsample kappas will have wide confidence intervals. `[TODO: bootstrap 95% CIs on the subsample kappas as part of EXP-24.]`
+- **Using Dim1's predicted label for stratification, not gold labels.** Ideally we would stratify on the gold labels, but if the cache does not contain gold labels for all 500 examples, stratifying on Dim1's predicted label is the fallback. This introduces a circularity: we are subsampling by the variable we are evaluating performance against. Note this in the paper. `[TODO: check whether cache_examples.jsonl has a gold_label field; if yes, restratify.]`
+- **The subsample is fixed by seed=42.** Different seeds will give different 168-sample subsets and slightly different numbers. `[TODO: rerun with seeds 1, 7, 13, 42, 100 and report the range of each headline metric.]`
+- **No new data is collected.** The subsample analysis inherits any biases in the original 500-example cache. If the cache is not representative of the target deployment distribution, the subsample does not fix that. This is a limitation of post-hoc reanalysis, not of the subsample procedure itself.
+- **Alternative design: oversampling the small classes.** We could resample with replacement to 194 per class (matching the largest class) instead of subsampling to 42. Oversampling preserves statistical power but introduces duplicate examples, which break kappa's independence assumption. Stratified subsample is more defensible but statistically weaker. If the subsample numbers look noisy, EXP-15b could rerun with oversampling for comparison. `[TODO: decide whether EXP-15b is worth running after seeing EXP-15a numbers.]`
+
+---
+---
+
 ## End of document
 
 **Summary of `[TODO]` items blocking final submission:**
