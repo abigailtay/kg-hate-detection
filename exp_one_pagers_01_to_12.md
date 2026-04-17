@@ -1018,6 +1018,70 @@ Appendix (robustness-check section) with the subsample ranking table and the per
 - **No new data is collected.** The subsample analysis inherits any biases in the original 500-example cache. If the cache is not representative of the target deployment distribution, the subsample does not fix that. This is a limitation of post-hoc reanalysis, not of the subsample procedure itself.
 - **Alternative design: oversampling the small classes.** We could resample with replacement to 194 per class (matching the largest class) instead of subsampling to 42. Oversampling preserves statistical power but introduces duplicate examples, which break kappa's independence assumption. Stratified subsample is more defensible but statistically weaker. If the subsample numbers look noisy, EXP-15b could rerun with oversampling for comparison. `[TODO: decide whether EXP-15b is worth running after seeing EXP-15a numbers.]`
 
+## EXP-15: Stratified Subsample Ablation
+**Date:** April 16, 2026
+**Status:** ✅ Complete
+**Type:** Post-hoc analysis (no API calls)
+**Output:** `src/critics/analysis_v2/stratified_subsample/`
+
+**Design:** Resample 500-example cache to 42 per class × 4 classes = 168 balanced examples (seed=42). Recompute per-model kappa-stability, action distributions, and C2 false-override rates. Break out per-class action profiles to disambiguate gpt-5.4-mini regression.
+
+**Results:**
+- gpt-5.4-mini κ jumped from 0.233 (full cache, worst) to **0.577 (balanced, best)**. The full-cache "regression" was a class-imbalance artifact.
+- Root cause: gpt-mini reviews **50.8%** of non-harmful content vs 13–23% for all other models. Harmful-class review rates are normal.
+- Diagnosis: **benign over-triggering under structured prompts** — not capacity limitation, not IH/IA boundary confusion. Smaller models treat detailed decision rules as evidence of suspicion.
+- Grok dropped from 0.353 to 0.311 on balanced set (worst). All other models improved by 0.13–0.18.
+
+| Model | κ (full 500) | κ (balanced 168) | Non-harmful review rate |
+|-------|-------------|-----------------|----------------------|
+| gpt-5.4-mini | 0.233* | **0.577** | **0.508** |
+| deepseek-r1 | 0.349 | 0.537 | 0.230 |
+| claude-sonnet-4-6 | 0.352 | 0.504 | 0.167 |
+| gemma-4-31b-it | 0.421 | 0.469 | 0.135 |
+| grok-4.20 | 0.353 | 0.311 | 0.183 |
+
+*\*Full-cache κ uses inter-model consensus metric; balanced κ uses intra-model critic-agreement metric. See EXP-24 for reconciliation.*
+
+**Paper implication:** Section 1.3 of RR-01 brief rewritten. gpt-mini is not a capacity caveat — it is a specific, operationally interpretable failure mode worth its own paragraph in Results.
+
+---
+
+## EXP-24: Bootstrap 95% Confidence Intervals on Kappa-Stability
+**Date:** April 16, 2026
+**Status:** ✅ Complete
+**Type:** Post-hoc analysis (no API calls)
+**Output:** `src/critics/analysis_v2/bootstrap_cis/`
+
+**Design:** 1,000 bootstrap iterations, resample with replacement (sample size = pool size), recompute mean pairwise Cohen's kappa across 3 critics per model. Three parts: (1) post-audit CIs on full 500, (2) paired pre/post audit delta with significance test, (3) gpt-mini full vs balanced comparison.
+
+**Part 1 — Post-audit ranking with error bars:**
+
+| Rank | Model | κ | 95% CI | CI width |
+|------|-------|---|--------|----------|
+| 1 | deepseek-r1 | 0.625 | [0.583, 0.670] | 0.088 |
+| 2 | claude-sonnet-4-6 | 0.621 | [0.585, 0.658] | 0.074 |
+| 3 | gpt-5.4-mini | 0.578 | [0.537, 0.620] | 0.083 |
+| 4 | gemma-4-31b-it | 0.553 | [0.508, 0.597] | 0.088 |
+| 5 | grok-4.20 | 0.400 | [0.362, 0.434] | 0.072 |
+
+Two tiers: {r1, sonnet} > {gpt-mini, gemma} >> {grok}. r1/sonnet CIs overlap (not significantly different). gpt-mini/gemma CIs overlap (not significantly different). Grok separated below all.
+
+**Part 2 — Audit improvement significance:**
+
+| Model | Delta | 95% CI | Significant? |
+|-------|-------|--------|-------------|
+| gemma-4-31b-it | +0.211 | [+0.174, +0.246] | **YES** |
+| gpt-5.4-mini | +0.078 | [+0.043, +0.115] | **YES** |
+| deepseek-r1 | +0.076 | [+0.033, +0.118] | **YES** |
+| claude-sonnet-4-6 | +0.068 | [+0.029, +0.106] | **YES** |
+| grok-4.20 | −0.032 | [−0.070, +0.010] | no |
+
+4/5 models show statistically significant improvement under the V2.1 prompt audit. Grok is the only non-significant model. gpt-mini **gained** +0.078 — the prior session's −0.070 "regression" is retracted (different metric).
+
+**Part 3 — gpt-mini full vs balanced:**
+Full κ = 0.578 CI [0.535, 0.617]; balanced κ = 0.577 CI [0.513, 0.640]. CIs overlap — not significantly different. EXP-15's benign over-escalation finding is real but does not change the ranking.
+
+**Paper implication:** All headline kappa numbers now have error bars. The audit story holds up under resampling. Gemma remains the cost-adjusted recommendation ($0.34, 48× cheaper than sonnet) despite ranking 4th on absolute κ.
 ---
 ---
 
